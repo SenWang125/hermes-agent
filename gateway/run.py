@@ -7562,7 +7562,10 @@ class GatewayRunner:
         data = None
 
         try:
-            data = _load_gateway_config()
+# Use Hermes config loader (supports ${VAR} env substitution)
+            # instead of raw yaml.safe_load which leaves ${PROXY_PORT} unresolved.
+            from hermes_cli.config import load_config as _info_load_config
+            data = _info_load_config() or {}
             if data:
                 model_cfg = data.get("model", {})
                 if isinstance(model_cfg, dict):
