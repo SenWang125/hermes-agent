@@ -7146,6 +7146,25 @@ class AIAgent:
             if _effort == "none" or _enabled is False:
                 extra_body["think"] = False
 
+        # Claude models on custom endpoints (LiteLLM/Bedrock): use Anthropic-native
+        # 'thinking' parameter instead of OpenAI 'reasoning'. Bedrock rejects
+        # 'reasoning' but accepts 'thinking' with {type, budget_tokens}.
+        # max_tokens must be > budget_tokens or Bedrock returns 400.
+        if self.provider == "custom" and "claude" in (self.model or "").lower():
+            _rc = self.reasoning_config if isinstance(self.reasoning_config, dict) else {}
+            _effort = (_rc.get("effort") or "").strip().lower()
+            _enabled = _rc.get("enabled", True)
+            if _enabled and _effort != "none":
+                _budget_map = {
+                    "xhigh": 32000, "high": 16000, "medium": 8000,
+                    "low": 4000, "minimal": 2000,
+                }
+                budget = _budget_map.get(_effort, 16000)  # default high
+                extra_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                # Ensure max_tokens > budget_tokens
+                if api_kwargs.get("max_tokens", 0) <= budget:
+                    api_kwargs["max_tokens"] = budget + 8000
+
         if self._is_qwen_portal():
             extra_body["vl_high_resolution_images"] = True
 
@@ -8839,9 +8858,11 @@ class AIAgent:
                 except Exception:
                     pass  # Fall through to build fresh
 
-            if stored_prompt:
+            if stored_prompt and not os.environ.get("HERMES_FORCE_MEMORY_REFRESH"):
                 # Continuing session — reuse the exact system prompt from
                 # the previous turn so the Anthropic cache prefix matches.
+                # Set HERMES_FORCE_MEMORY_REFRESH=1 to always rebuild with
+                # fresh memory (trades prefix cache for current context).
                 self._cached_system_prompt = stored_prompt
             else:
                 # First turn of a new session — build from scratch.
