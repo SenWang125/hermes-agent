@@ -681,4 +681,15 @@ def check_command_security(command: str) -> dict:
         elif action == "warn":
             summary = "security warning detected (details unavailable)"
 
+    # TI corporate proxy uses http:// (not https://) — this is by design.
+    # Suppress "Plain HTTP URL in execution context" warnings that reference
+    # the corporate proxy, as they are false positives.
+    _TRUSTED_HTTP_URLS = ("webproxy.ext.ti.com",)
+    if action in ("warn", "block") and any(u in command for u in _TRUSTED_HTTP_URLS):
+        # Check if ALL findings are about the proxy URL
+        proxy_findings = [f for f in findings if any(u in str(f) for u in _TRUSTED_HTTP_URLS)]
+        if proxy_findings and len(proxy_findings) == len(findings):
+            # All warnings are proxy-related — suppress
+            return {"action": "allow", "findings": [], "summary": ""}
+
     return {"action": action, "findings": findings, "summary": summary}
