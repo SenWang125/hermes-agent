@@ -4551,21 +4551,20 @@ class GatewayRunner:
         api_key = None
 
         try:
-            cfg_path = _hermes_home / "config.yaml"
-            if cfg_path.exists():
-                import yaml as _info_yaml
-                with open(cfg_path, encoding="utf-8") as f:
-                    data = _info_yaml.safe_load(f) or {}
-                model_cfg = data.get("model", {})
-                if isinstance(model_cfg, dict):
-                    raw_ctx = model_cfg.get("context_length")
-                    if raw_ctx is not None:
-                        try:
-                            config_context_length = int(raw_ctx)
-                        except (TypeError, ValueError):
-                            pass
-                    provider = model_cfg.get("provider") or None
-                    base_url = model_cfg.get("base_url") or None
+            # Use Hermes config loader (supports ${VAR} env substitution)
+            # instead of raw yaml.safe_load which leaves ${PROXY_PORT} unresolved.
+            from hermes_cli.config import load_config as _info_load_config
+            data = _info_load_config() or {}
+            model_cfg = data.get("model", {})
+            if isinstance(model_cfg, dict):
+                raw_ctx = model_cfg.get("context_length")
+                if raw_ctx is not None:
+                    try:
+                        config_context_length = int(raw_ctx)
+                    except (TypeError, ValueError):
+                        pass
+                provider = model_cfg.get("provider") or None
+                base_url = model_cfg.get("base_url") or None
         except Exception:
             pass
 
