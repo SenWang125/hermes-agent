@@ -136,6 +136,29 @@ DANGEROUS_PATTERNS = [
     # a script is first made executable then immediately run. The script
     # content may contain dangerous commands that individual patterns miss.
     (r'\bchmod\s+\+x\b.*[;&|]+\s*\./', "chmod +x followed by immediate execution"),
+    # =========================================================================
+    # TI CORPORATE DLP — outbound data transmission prevention
+    # These patterns catch commands that could exfiltrate data. Hermes operates
+    # in receive-only mode on the TI corporate network.
+    # =========================================================================
+    (r'\bgit\s+push\b', "git push (outbound data — requires explicit user approval)"),
+    # curl DLP patterns: use [^|]* instead of .* to avoid matching across pipe boundaries.
+    # Without this, "curl ... | w3m -T text/html" falsely triggers "curl -T upload".
+    (r'\bcurl\b[^|]*-X\s*(POST|PUT|PATCH|DELETE)\b', "curl with write method (outbound data)"),
+    (r'\bcurl\b[^|]*--data\b', "curl --data (outbound data)"),
+    (r'\bcurl\b[^|]*-d\s+', "curl -d (outbound data)"),
+    (r'\bcurl\b[^|]*--upload-file\b', "curl --upload-file (outbound data)"),
+    (r'\bcurl\b[^|]*-T\s+', "curl -T upload (outbound data)"),
+    (r'\bcurl\b[^|]*-F\s+', "curl -F form upload (outbound data)"),
+    (r'\bwget\s+--post', "wget POST (outbound data)"),
+    (r'\bscp\b', "scp (outbound file transfer)"),
+    (r'\brsync\b.*[^/]\w+@\w+:', "rsync to remote host (outbound data)"),
+    (r'\bsftp\b', "sftp (outbound file transfer)"),
+    (r'\bnc\b.*-[^\s]*[lp]', "netcat listener/connect (network exposure)"),
+    (r'\bnetcat\b', "netcat (network exposure)"),
+    (r'\bssh\b.*\S+@\S+\s+\S', "ssh with remote command (potential data exfiltration)"),
+    (r'\bgit\s+send-email\b', "git send-email (outbound data — requires explicit user approval)"),
+    (r'\bhermes\s+gateway\s+setup\b', "gateway setup (configures external messaging — review carefully)"),
 ]
 
 
