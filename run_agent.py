@@ -11647,9 +11647,11 @@ class AIAgent:
                 except Exception:
                     pass  # Fall through to build fresh
 
-            if stored_prompt:
+            if stored_prompt and not os.environ.get("HERMES_FORCE_MEMORY_REFRESH"):
                 # Continuing session — reuse the exact system prompt from
                 # the previous turn so the Anthropic cache prefix matches.
+                # Set HERMES_FORCE_MEMORY_REFRESH=1 to always rebuild with
+                # fresh memory (trades prefix cache for current context).
                 self._cached_system_prompt = stored_prompt
             else:
                 # First turn of a new session — build from scratch.
