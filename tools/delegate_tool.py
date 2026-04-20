@@ -2372,6 +2372,12 @@ def _resolve_delegation_credentials(cfg: dict, parent_agent) -> dict:
         elif "api.kimi.com/coding" in base_lower:
             provider = "custom"
             api_mode = "anthropic_messages"
+        # Respect explicit delegation.provider when set (e.g. "anthropic" for
+        # LiteLLM proxies that accept the Anthropic Messages API format).
+        if configured_provider and configured_provider != "custom":
+            provider = configured_provider
+            if provider == "anthropic":
+                api_mode = "anthropic_messages"
 
         return {
             "model": configured_model,
