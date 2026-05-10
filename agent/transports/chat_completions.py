@@ -375,6 +375,24 @@ class ChatCompletionsTransport(ProviderTransport):
             if thinking_config:
                 extra_body["thinking_config"] = thinking_config
 
+        # Claude models on custom endpoints (LiteLLM proxy, Bedrock via proxy):
+        # use Anthropic-native 'thinking' parameter instead of OpenAI 'reasoning'.
+        # Bedrock rejects 'reasoning' as "extra inputs not permitted" but accepts
+        # 'thinking' with {type, budget_tokens}. max_tokens must exceed budget.
+        if is_custom_provider and "claude" in (model or "").lower():
+            _rc = reasoning_config if isinstance(reasoning_config, dict) else {}
+            _effort = (_rc.get("effort") or "").strip().lower()
+            _enabled = _rc.get("enabled", True)
+            if _enabled and _effort != "none":
+                _budget_map = {
+                    "xhigh": 32000, "high": 16000, "medium": 8000,
+                    "low": 4000, "minimal": 2000,
+                }
+                budget = _budget_map.get(_effort, 16000)
+                extra_body["thinking"] = {"type": "enabled", "budget_tokens": budget}
+                if api_kwargs.get("max_tokens", 0) <= budget:
+                    api_kwargs["max_tokens"] = budget + 8000
+
         # Merge any pre-built extra_body additions
         additions = params.get("extra_body_additions")
         if additions:

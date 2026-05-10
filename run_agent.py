@@ -1533,6 +1533,14 @@ class AIAgent:
                 from agent.anthropic_adapter import _is_oauth_token as _is_oat
                 self._is_anthropic_oauth = _is_oat(effective_key) if _is_native_anthropic else False
                 self._anthropic_client = build_anthropic_client(effective_key, base_url, timeout=_provider_timeout)
+                # Ensure self.base_url matches what we gave the client.
+                # Without this, self.base_url can be empty/"" when base_url was
+                # passed as a constructor arg but not persisted (the Anthropic
+                # path skips the OpenAI client_kwargs path that normally sets it).
+                # Error display reads self.base_url and shows the SDK default
+                # (api.anthropic.com) if it's empty.
+                if base_url:
+                    self.base_url = base_url
                 # No OpenAI client needed for Anthropic mode
                 self.client = None
                 self._client_kwargs = {}
@@ -3869,14 +3877,19 @@ class AIAgent:
     # ------------------------------------------------------------------
 
     _MEMORY_REVIEW_PROMPT = (
-        "Review the conversation above and consider saving to memory if appropriate.\n\n"
-        "Focus on:\n"
-        "1. Has the user revealed things about themselves — their persona, desires, "
-        "preferences, or personal details worth remembering?\n"
-        "2. Has the user expressed expectations about how you should behave, their work "
-        "style, or ways they want you to operate?\n\n"
-        "If something stands out, save it using the memory tool. "
-        "If nothing is worth saving, just say 'Nothing to save.' and stop."
+        "Review the conversation above and save important information to memory.\n\n"
+        "SAVE THESE (priority order):\n"
+        "1. Debugging findings: errors encountered, root causes found, fixes applied\n"
+        "2. Decisions made: which approach was chosen and WHY\n"
+        "3. User corrections: anything the user said was wrong or should be done differently\n"
+        "4. Project state: what was completed, what's blocked, what's next\n"
+        "5. Technical discoveries: API quirks, tool behavior, workarounds\n"
+        "6. User preferences: communication style, workflow expectations\n"
+        "7. Environment facts: IPs, ports, versions, paths discovered during work\n\n"
+        "SKIP: generic facts already known, transient details, completed TODO items.\n"
+        "Use 'replace' to update stale entries, not just 'add'.\n\n"
+        "Save at least one thing if ANY real work was done. "
+        "If truly nothing happened, say 'Nothing to save.' and stop."
     )
 
     _SKILL_REVIEW_PROMPT = (

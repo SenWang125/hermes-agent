@@ -561,6 +561,23 @@ def check_delegate_requirements() -> bool:
     return True
 
 
+def _load_subagent_environment_context() -> str:
+    """Load environment context for subagents from HERMES_HOME/subagent-context.md.
+
+    This file provides subagents with essential environment knowledge they'd
+    otherwise miss (proxy config, web research tools, DLP rules) since they
+    don't load SOUL.md or skills.
+    """
+    try:
+        from hermes_constants import get_hermes_home
+        ctx_file = get_hermes_home() / "subagent-context.md"
+        if ctx_file.exists():
+            return ctx_file.read_text().strip()
+    except Exception:
+        pass
+    return ""
+
+
 def _build_child_system_prompt(
     goal: str,
     context: Optional[str] = None,
@@ -591,6 +608,11 @@ def _build_child_system_prompt(
             f"{workspace_path}\n"
             "Use this exact path for local repository/workdir operations unless the task explicitly says otherwise."
         )
+    # Inject environment context (proxy, web tools, DLP rules) so subagents
+    # know how to access the internet and what tools are available.
+    env_ctx = _load_subagent_environment_context()
+    if env_ctx:
+        parts.append(f"\nENVIRONMENT:\n{env_ctx}")
     parts.append(
         "\nComplete this task using the tools available to you. "
         "When finished, provide a clear, concise summary of:\n"
@@ -1133,9 +1155,16 @@ def _build_child_agent(
 
     # Share a credential pool with the child when possible so subagents can
     # rotate credentials on rate limits instead of getting pinned to one key.
-    child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
-    if child_pool is not None:
-        child._credential_pool = child_pool
+    # Skip for localhost proxy endpoints: load_pool("anthropic") discovers
+    # system-wide Anthropic credentials (Claude Code OAuth, etc.) with
+    # base_url=api.anthropic.com. On first retry, _swap_credential overwrites
+    # the child's localhost proxy URL with api.anthropic.com, breaking
+    # connectivity.
+    _skip_pool = "localhost" in (effective_base_url or "") or "127.0.0.1" in (effective_base_url or "")
+    if not _skip_pool:
+        child_pool = _resolve_child_credential_pool(effective_provider, parent_agent)
+        if child_pool is not None:
+            child._credential_pool = child_pool
 
     # Register child for interrupt propagation
     if hasattr(parent_agent, "_active_children"):
