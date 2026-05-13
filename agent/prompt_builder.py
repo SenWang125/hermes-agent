@@ -10,10 +10,11 @@ import os
 import re
 import threading
 from collections import OrderedDict
+from contextvars import ContextVar
 from pathlib import Path
+from typing import Dict, List, Optional
 
 from hermes_constants import get_hermes_home, get_skills_dir, is_wsl
-from typing import Optional
 
 from agent.skill_utils import (
     extract_skill_conditions,
@@ -27,6 +28,27 @@ from agent.skill_utils import (
 from utils import atomic_json_write
 
 logger = logging.getLogger(__name__)
+
+# ── Per-session skill tag context ─────────────────────────────────────────────
+# Each gateway session runs in its own async task. The contextvar scopes the
+# active session ID to that task so concurrent sessions don't see each other's
+# tags. The cache dict maps session_id → tag list set by the classifier hook.
+
+_current_session_id: ContextVar[str] = ContextVar("hermes_session_id", default="")
+_session_tags_cache: Dict[str, List[str]] = {}
+_session_tags_lock = threading.Lock()
+
+
+def set_session_skill_tags(session_id: str, tags: List[str]) -> None:
+    """Store per-session active skill tags. Called by the classifier hook."""
+    with _session_tags_lock:
+        _session_tags_cache[session_id] = [str(t).strip().lower() for t in tags if t]
+
+
+def clear_session_skill_tags(session_id: str) -> None:
+    """Remove session tags on session end to avoid unbounded cache growth."""
+    with _session_tags_lock:
+        _session_tags_cache.pop(session_id, None)
 
 # ---------------------------------------------------------------------------
 # Context file scanning — detect prompt injection in AGENTS.md, .cursorrules,
@@ -148,41 +170,23 @@ HERMES_AGENT_HELP_GUIDANCE = (
 )
 
 MEMORY_GUIDANCE = (
-    "You have persistent memory across sessions. Save durable facts using the memory "
-    "tool: user preferences, environment details, tool quirks, and stable conventions. "
-    "Memory is injected into every turn, so keep it compact and focused on facts that "
-    "will still matter later.\n"
-    "Prioritize what reduces future user steering — the most valuable memory is one "
-    "that prevents the user from having to correct or remind you again. "
-    "User preferences and recurring corrections matter more than procedural task details.\n"
-    "Do NOT save task progress, session outcomes, completed-work logs, or temporary TODO "
-    "state to memory; use session_search to recall those from past transcripts. "
-    "Specifically: do not record PR numbers, issue numbers, commit SHAs, 'fixed bug X', "
-    "'submitted PR Y', 'Phase N done', file counts, or any artifact that will be stale "
-    "in 7 days. If a fact will be stale in a week, it does not belong in memory. "
-    "If you've discovered a new way to do something, solved a problem that could be "
-    "necessary later, save it as a skill with the skill tool.\n"
-    "Write memories as declarative facts, not instructions to yourself. "
-    "'User prefers concise responses' ✓ — 'Always respond concisely' ✗. "
-    "'Project uses pytest with xdist' ✓ — 'Run tests with pytest -n 4' ✗. "
-    "Imperative phrasing gets re-read as a directive in later sessions and can "
-    "cause repeated work or override the user's current request. Procedures and "
-    "workflows belong in skills, not memory."
+    "Persistent memory loads every turn — keep it compact and high-signal. "
+    "Save: user preferences, recurring corrections, environment details, tool quirks, stable conventions. "
+    "Prioritize what prevents the user from correcting or re-steering you — corrections and preferences outweigh task details.\n"
+    "DON'T save: task progress, PR/issue/SHA numbers, phase completions, or anything stale in 7 days — use session_search for those.\n"
+    "Write as declarative facts, not directives: 'User prefers concise responses' ✓ — 'Always respond concisely' ✗. "
+    "Imperative phrasing re-reads as a directive in future sessions and overrides the user's actual request. "
+    "Procedures and workflows belong in skills, not memory."
 )
 
 SESSION_SEARCH_GUIDANCE = (
-    "When the user references something from a past conversation or you suspect "
-    "relevant cross-session context exists, use session_search to recall it before "
-    "asking them to repeat themselves."
+    "Use session_search when the user references past context before asking them to repeat themselves."
 )
 
 SKILLS_GUIDANCE = (
-    "After completing a complex task (5+ tool calls), fixing a tricky error, "
-    "or discovering a non-trivial workflow, save the approach as a "
-    "skill with skill_manage so you can reuse it next time.\n"
-    "When using a skill and finding it outdated, incomplete, or wrong, "
-    "patch it immediately with skill_manage(action='patch') — don't wait to be asked. "
-    "Skills that aren't maintained become liabilities."
+    "After a complex task (5+ tool calls), fixing a tricky error, or discovering a non-trivial workflow, "
+    "save the approach as a skill with skill_manage for future reuse.\n"
+    "When a loaded skill is outdated, incomplete, or wrong, patch it immediately with skill_manage(action='patch') — don't wait."
 )
 
 KANBAN_GUIDANCE = (
@@ -244,18 +248,10 @@ KANBAN_GUIDANCE = (
 )
 
 TOOL_USE_ENFORCEMENT_GUIDANCE = (
-    "# Tool-use enforcement\n"
-    "You MUST use your tools to take action — do not describe what you would do "
-    "or plan to do without actually doing it. When you say you will perform an "
-    "action (e.g. 'I will run the tests', 'Let me check the file', 'I will create "
-    "the project'), you MUST immediately make the corresponding tool call in the same "
-    "response. Never end your turn with a promise of future action — execute it now.\n"
-    "Keep working until the task is actually complete. Do not stop with a summary of "
-    "what you plan to do next time. If you have tools available that can accomplish "
-    "the task, use them instead of telling the user what you would do.\n"
-    "Every response should either (a) contain tool calls that make progress, or "
-    "(b) deliver a final result to the user. Responses that only describe intentions "
-    "without acting are not acceptable."
+    "Tool-use: don't describe actions — take them. "
+    "When you say you will do something, make the tool call in the same response — never end a turn with a promise of future action.\n"
+    "Every response must either (a) make tool calls that progress the task, or (b) deliver a final result. "
+    "Keep working until the task is actually complete."
 )
 
 # Model name substrings that trigger tool-use enforcement guidance.
@@ -946,6 +942,34 @@ def _parse_skill_file(skill_file: Path) -> tuple[bool, dict, str]:
         return True, {}, ""
 
 
+def _get_active_skill_tags() -> "set[str]":
+    """Return active skill tags for the current session.
+
+    Priority:
+      1. Per-session cache set by the classifier hook (session-scoped, concurrent-safe)
+      2. Global ``skills.active_tags`` from config.yaml (manual override)
+      3. Empty set — no filtering, all skills show
+    """
+    # 1. Session-local tags (set by agent:start classifier hook)
+    sid = _current_session_id.get()
+    if sid:
+        with _session_tags_lock:
+            cached = _session_tags_cache.get(sid)
+        if cached is not None:            # cached may be [] (explicitly "no active tags for this session")
+            return set(cached)
+
+    # 2. Global config fallback
+    try:
+        from hermes_cli.config import load_config
+        cfg = load_config() or {}
+        raw = (cfg.get("skills") or {}).get("active_tags") or []
+        if isinstance(raw, str):
+            raw = [t.strip() for t in raw.split(",") if t.strip()]
+        return {str(t).strip().lower() for t in raw if t}
+    except Exception:
+        return set()
+
+
 def _skill_should_show(
     conditions: dict,
     available_tools: "set[str] | None",
@@ -972,6 +996,14 @@ def _skill_should_show(
             return False
     for t in conditions.get("requires_tools", []):
         if t not in at:
+            return False
+
+    # tags: if skill declares tags AND active_tags is configured, hide unless one matches.
+    # Skills with no tags always show (backward compat).
+    skill_tags = conditions.get("tags") or []
+    if skill_tags:
+        active = _get_active_skill_tags()
+        if active and not any(t in active for t in skill_tags):
             return False
 
     return True
@@ -1173,32 +1205,16 @@ def build_skills_system_prompt(
                     index_lines.append(f"    - {name}")
 
         result = (
-            "## Skills (mandatory)\n"
-            "Before replying, scan the skills below. If a skill matches or is even partially relevant "
-            "to your task, you MUST load it with skill_view(name) and follow its instructions. "
-            "Err on the side of loading — it is always better to have context you don't need "
-            "than to miss critical steps, pitfalls, or established workflows. "
-            "Skills contain specialized knowledge — API endpoints, tool-specific commands, "
-            "and proven workflows that outperform general-purpose approaches. Load the skill "
-            "even if you think you could handle the task with basic tools like web_search or terminal. "
-            "Skills also encode the user's preferred approach, conventions, and quality standards "
-            "for tasks like code review, planning, and testing — load them even for tasks you "
-            "already know how to do, because the skill defines how it should be done here.\n"
-            "Whenever the user asks you to configure, set up, install, enable, disable, modify, "
-            "or troubleshoot Hermes Agent itself — its CLI, config, models, providers, tools, "
-            "skills, voice, gateway, plugins, or any feature — load the `hermes-agent` skill "
-            "first. It has the actual commands (e.g. `hermes config set …`, `hermes tools`, "
-            "`hermes setup`) so you don't have to guess or invent workarounds.\n"
-            "If a skill has issues, fix it with skill_manage(action='patch').\n"
-            "After difficult/iterative tasks, offer to save as a skill. "
-            "If a skill you loaded was missing steps, had wrong commands, or needed "
-            "pitfalls you discovered, update it before finishing.\n"
-            "\n"
+            "## Skills\n"
+            "Scan below. If relevant — even partially — load with skill_view(name) and follow its instructions. "
+            "Err on loading: skills encode the correct commands, pitfalls, and conventions for this user's setup; "
+            "load even if you think you can handle it without, because the skill defines how it's done here.\n"
+            "For Hermes config/setup/troubleshooting: always load `hermes-agent` first.\n"
+            "If a loaded skill is wrong or outdated, patch it with skill_manage(action='patch') before finishing. "
+            "After difficult tasks, save new workflows as skills.\n"
             "<available_skills>\n"
             + "\n".join(index_lines) + "\n"
-            "</available_skills>\n"
-            "\n"
-            "Only proceed without loading a skill if genuinely none are relevant to the task."
+            "</available_skills>"
         )
 
     # ── Store in LRU cache ────────────────────────────────────────────

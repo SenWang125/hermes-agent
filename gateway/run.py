@@ -7122,18 +7122,33 @@ class GatewayRunner:
             }
             await self.hooks.emit("agent:start", hook_ctx)
 
+            # Scope the current session ID into the prompt-builder contextvar so
+            # per-session skill tag filtering sees the right session for this task.
+            try:
+                from agent.prompt_builder import _current_session_id as _pb_session_id
+                _pb_token = _pb_session_id.set(session_entry.session_id)
+            except Exception:
+                _pb_token = None
+
             # Run the agent
-            agent_result = await self._run_agent(
-                message=message_text,
-                context_prompt=context_prompt,
-                history=history,
-                source=source,
-                session_id=session_entry.session_id,
-                session_key=session_key,
-                run_generation=run_generation,
-                event_message_id=self._reply_anchor_for_event(event),
-                channel_prompt=event.channel_prompt,
-            )
+            try:
+                agent_result = await self._run_agent(
+                    message=message_text,
+                    context_prompt=context_prompt,
+                    history=history,
+                    source=source,
+                    session_id=session_entry.session_id,
+                    session_key=session_key,
+                    run_generation=run_generation,
+                    event_message_id=self._reply_anchor_for_event(event),
+                    channel_prompt=event.channel_prompt,
+                )
+            finally:
+                if _pb_token is not None:
+                    try:
+                        _pb_session_id.reset(_pb_token)
+                    except Exception:
+                        pass
 
             # Stop persistent typing indicator now that the agent is done
             try:
@@ -7730,6 +7745,15 @@ class GatewayRunner:
             _old_sid = old_entry.session_id if old_entry else None
             _invoke_hook("on_session_finalize", session_id=_old_sid,
                          platform=source.platform.value if source.platform else "")
+        except Exception:
+            pass
+
+        # Clean up per-session skill tag cache for the ending session
+        try:
+            from agent.prompt_builder import clear_session_skill_tags as _clear_tags
+            _old_sid = old_entry.session_id if old_entry else None
+            if _old_sid:
+                _clear_tags(_old_sid)
         except Exception:
             pass
 
@@ -8875,7 +8899,11 @@ class GatewayRunner:
 
         # Otherwise — treat the remaining text as the new goal.
         try:
-            state = mgr.set(args)
+            _goal_model = (
+                (self.config.get("model", {}) or {}).get("default", "")
+                if isinstance(self.config, dict) else ""
+            ) or ""
+            state = mgr.set(args, model=_goal_model)
         except ValueError as exc:
             return t("gateway.goal.invalid", error=str(exc))
 
@@ -8993,7 +9021,25 @@ class GatewayRunner:
         if not mgr.is_active():
             return
 
-        decision = mgr.evaluate_after_turn(final_response or "", user_initiated=True)
+        # Fetch current session token totals from DB for per-turn cost tracking.
+        _token_snapshot = None
+        try:
+            from hermes_state import SessionDB
+            _sdb = SessionDB()
+            _row = _sdb.get_session(sid)
+            if _row:
+                _token_snapshot = {
+                    "input": int(_row.get("input_tokens") or 0),
+                    "write": int(_row.get("cache_write_tokens") or 0),
+                    "read":  int(_row.get("cache_read_tokens") or 0),
+                    "output": int(_row.get("output_tokens") or 0),
+                }
+        except Exception as _tok_exc:
+            logger.debug("goal continuation: token snapshot fetch failed: %s", _tok_exc)
+
+        decision = mgr.evaluate_after_turn(
+            final_response or "", user_initiated=True, token_snapshot=_token_snapshot
+        )
         msg = decision.get("message") or ""
 
         # Defer the status line until after the adapter has delivered the

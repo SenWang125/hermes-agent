@@ -29,8 +29,25 @@ import os
 from pathlib import Path
 from typing import Any, Iterable, Optional
 
-_DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "cwd")
+_DEFAULT_FIELDS: tuple[str, ...] = ("model", "context_pct", "zone", "cwd")
 _SEP = " · "
+
+# Context pressure zones from "Making Every Token Count"
+_ZONES: tuple[tuple[int, str], ...] = (
+    (30,  "safe"),
+    (50,  "monitor"),
+    (70,  "planning"),
+    (90,  "critical"),
+    (101, "emergency"),
+)
+
+
+def _context_zone(pct: int) -> str:
+    """Return zone label for context pressure percentage."""
+    for threshold, label in _ZONES:
+        if pct < threshold:
+            return label
+    return "emergency"
 
 
 def _home_relative_cwd(cwd: str) -> str:
@@ -112,6 +129,10 @@ def format_runtime_footer(
             if context_length and context_length > 0 and context_tokens >= 0:
                 pct = max(0, min(100, round((context_tokens / context_length) * 100)))
                 parts.append(f"{pct}%")
+        elif field == "zone":
+            if context_length and context_length > 0 and context_tokens >= 0:
+                pct = max(0, min(100, round((context_tokens / context_length) * 100)))
+                parts.append(_context_zone(pct))
         elif field == "cwd":
             rel = _home_relative_cwd(cwd or os.environ.get("TERMINAL_CWD", ""))
             if rel:

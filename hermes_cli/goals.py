@@ -108,6 +108,17 @@ class GoalState:
     last_reason: Optional[str] = None
     paused_reason: Optional[str] = None       # why we auto-paused (budget, etc.)
     consecutive_parse_failures: int = 0       # judge-output parse failures in a row
+    # Token tracking since goal was set
+    model: str = ""                           # model name for cost calculation
+    goal_tokens_input: int = 0
+    goal_tokens_write: int = 0
+    goal_tokens_read: int = 0
+    goal_tokens_output: int = 0
+    # Last session-cumulative snapshot — used to compute per-turn deltas
+    snap_input: int = 0
+    snap_write: int = 0
+    snap_read: int = 0
+    snap_output: int = 0
 
     def to_json(self) -> str:
         return json.dumps(asdict(self), ensure_ascii=False)
@@ -126,6 +137,43 @@ class GoalState:
             last_reason=data.get("last_reason"),
             paused_reason=data.get("paused_reason"),
             consecutive_parse_failures=int(data.get("consecutive_parse_failures", 0) or 0),
+            model=data.get("model", ""),
+            goal_tokens_input=int(data.get("goal_tokens_input", 0) or 0),
+            goal_tokens_write=int(data.get("goal_tokens_write", 0) or 0),
+            goal_tokens_read=int(data.get("goal_tokens_read", 0) or 0),
+            goal_tokens_output=int(data.get("goal_tokens_output", 0) or 0),
+            snap_input=int(data.get("snap_input", 0) or 0),
+            snap_write=int(data.get("snap_write", 0) or 0),
+            snap_read=int(data.get("snap_read", 0) or 0),
+            snap_output=int(data.get("snap_output", 0) or 0),
+        )
+
+    def apply_token_snapshot(self, *, input_: int, write: int, read: int, output: int) -> None:
+        """Accumulate delta from session-cumulative snapshot and update snapshot."""
+        self.goal_tokens_input  += max(0, input_  - self.snap_input)
+        self.goal_tokens_write  += max(0, write   - self.snap_write)
+        self.goal_tokens_read   += max(0, read    - self.snap_read)
+        self.goal_tokens_output += max(0, output  - self.snap_output)
+        self.snap_input  = input_
+        self.snap_write  = write
+        self.snap_read   = read
+        self.snap_output = output
+
+    def estimated_cost_usd(self) -> float:
+        """Estimate goal cost using official Anthropic per-MTok rates."""
+        m = self.model.lower()
+        if "opus" in m:
+            ri, rw, rr, ro = 5.00, 6.25, 0.50, 25.00
+        elif "haiku" in m:
+            ri, rw, rr, ro = 1.00, 1.25, 0.10, 5.00
+        else:
+            ri, rw, rr, ro = 3.00, 3.75, 0.30, 15.00
+        M = 1_000_000
+        return (
+            self.goal_tokens_input  / M * ri +
+            self.goal_tokens_write  / M * rw +
+            self.goal_tokens_read   / M * rr +
+            self.goal_tokens_output / M * ro
         )
 
 
@@ -396,18 +444,27 @@ class GoalManager:
         if s is None or s.status in ("cleared",):
             return "No active goal. Set one with /goal <text>."
         turns = f"{s.turns_used}/{s.max_turns} turns"
+        elapsed = ""
+        if s.created_at:
+            secs = int(time.time() - s.created_at)
+            if secs < 3600:
+                elapsed = f"{secs // 60}m"
+            else:
+                elapsed = f"{secs // 3600}h{(secs % 3600) // 60}m"
+        cost = s.estimated_cost_usd()
+        meta = f"{turns}, {elapsed}, ${cost:.2f}" if elapsed else f"{turns}, ${cost:.2f}"
         if s.status == "active":
-            return f"⊙ Goal (active, {turns}): {s.goal}"
+            return f"⊙ Goal (active · {meta}): {s.goal}"
         if s.status == "paused":
             extra = f" — {s.paused_reason}" if s.paused_reason else ""
-            return f"⏸ Goal (paused, {turns}{extra}): {s.goal}"
+            return f"⏸ Goal (paused · {meta}{extra}): {s.goal}"
         if s.status == "done":
-            return f"✓ Goal done ({turns}): {s.goal}"
-        return f"Goal ({s.status}, {turns}): {s.goal}"
+            return f"✓ Goal done ({meta}): {s.goal}"
+        return f"Goal ({s.status} · {meta}): {s.goal}"
 
     # --- mutation -----------------------------------------------------
 
-    def set(self, goal: str, *, max_turns: Optional[int] = None) -> GoalState:
+    def set(self, goal: str, *, max_turns: Optional[int] = None, model: str = "") -> GoalState:
         goal = (goal or "").strip()
         if not goal:
             raise ValueError("goal text is empty")
@@ -418,6 +475,7 @@ class GoalManager:
             max_turns=int(max_turns) if max_turns else self.default_max_turns,
             created_at=time.time(),
             last_turn_at=0.0,
+            model=model,
         )
         self._state = state
         save_goal(self.session_id, state)
@@ -463,6 +521,7 @@ class GoalManager:
         last_response: str,
         *,
         user_initiated: bool = True,
+        token_snapshot: Optional[Dict[str, int]] = None,
     ) -> Dict[str, Any]:
         """Run the judge and update state. Return a decision dict.
 
@@ -492,6 +551,13 @@ class GoalManager:
         # Count the turn that just finished.
         state.turns_used += 1
         state.last_turn_at = time.time()
+        if token_snapshot:
+            state.apply_token_snapshot(
+                input_=token_snapshot.get("input", 0),
+                write=token_snapshot.get("write", 0),
+                read=token_snapshot.get("read", 0),
+                output=token_snapshot.get("output", 0),
+            )
 
         verdict, reason, parse_failed = judge_goal(state.goal, last_response)
         state.last_verdict = verdict

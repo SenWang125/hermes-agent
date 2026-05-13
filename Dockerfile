@@ -103,6 +103,17 @@ RUN chmod -R a+rX /opt/hermes && \
 # this a fast (~1s) egg-link creation with no resolution or downloads.
 RUN uv pip install --no-cache-dir --no-deps -e "."
 
+# ---------- TI MCP servers (Memory, RLM, MAKER) ----------
+RUN cd /tmp && uv pip install \
+    --python /opt/hermes/.venv/bin/python \
+    ti-claude-memory-mcp ti-claude-rlm-mcp ti-claude-maker-mcp \
+    --index-url https://artifactory.itg.ti.com/artifactory/api/pypi/pypi-virtual/simple \
+    --trusted-host artifactory.itg.ti.com \
+    --no-cache && \
+    uv pip uninstall \
+    --python /opt/hermes/.venv/bin/python \
+    a2a-sdk grpcio grpcio-tools grpcio-reflection 2>/dev/null || true
+
 # ---------- Runtime ----------
 ENV HERMES_WEB_DIST=/opt/hermes/hermes_cli/web_dist
 ENV HERMES_HOME=/opt/data

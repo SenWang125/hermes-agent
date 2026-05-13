@@ -293,11 +293,16 @@ def extract_skill_conditions(frontmatter: Dict[str, Any]) -> Dict[str, List]:
     hermes = metadata.get("hermes") or {}
     if not isinstance(hermes, dict):
         hermes = {}
+    # Top-level 'tags' field — list of context tags (e.g. [kernel, upstream, zephyr])
+    raw_tags = frontmatter.get("tags") or []
+    if isinstance(raw_tags, str):
+        raw_tags = [t.strip() for t in raw_tags.split(",") if t.strip()]
     return {
         "fallback_for_toolsets": hermes.get("fallback_for_toolsets", []),
         "requires_toolsets": hermes.get("requires_toolsets", []),
         "fallback_for_tools": hermes.get("fallback_for_tools", []),
         "requires_tools": hermes.get("requires_tools", []),
+        "tags": [str(t).strip().lower() for t in raw_tags if t],
     }
 
 
